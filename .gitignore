@@ -1,0 +1,73 @@
+# Byte-compiled / optimized / DLL mofules
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+.pip-log/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# 가상환경 (Virtual Environments)
+.env/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# 개발 환경 및 보안 파일 (CRITICAL)
+.env
+.env.*
+!.env.example # 템플릿용 파일은 예외적으로 허용 가능
+
+# IDEs and editors
+.icanvas
+.project
+.settings/
+.pydevproject
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 로컬 데이터 및 PDF 스토리지 백업 데이터 제외
+app/storage/
+*.pdf
+*.csv
+*.db
