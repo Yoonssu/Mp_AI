@@ -3,25 +3,32 @@ import time
 from chromadb import PersistentClient
 from langchain_chroma import Chroma
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
-from langchain_upstage import UpstageEmbeddings, UpstageDocumentParseLoader
+from langchain_upstage import UpstageEmbeddings, UpstageDocumentParseLoader, ChatUpstage
+from langchain_core.prompts import PromptTemplate
 from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 load_dotenv()
 
 # 1. 설정
-DB_PATH = "./chroma_db"
+DB_PATH = "c:/Users/user/Documents/과천시/Mon/Mp_AI/chroma_db"
 STORAGE_DIR = "app/storage"
 
 client = PersistentClient(path=DB_PATH)
+
 embeddings = UpstageEmbeddings(model="solar-embedding-1-large")
-vector_store = Chroma(collection_name="financial_docs", embedding_function=embeddings, persist_directory=DB_PATH)
+# [수정] LLM을 이용해 요약본을 생성하기 위한 모델 로드
+llm = ChatUpstage(model="solar-1-mini-chat")
+
+# Track B: 기존 상세 조항 파편들 저장용
+detail_vector_store = Chroma(collection_name="financial_docs", embedding_function=embeddings, persist_directory=DB_PATH)
+# Track A: [핵심] 1단계 전수조사용 1장짜리 요약본 저장용
+summary_vector_store = Chroma(collection_name="product_summaries", embedding_function=embeddings, persist_directory=DB_PATH)
 
 def get_bank_name(code):
     mapping = {"SH": "Shinhan", "KB": "Kookmin", "HN": "Hana", "TS": "Toss", "KA": "Kakao"}
     return mapping.get(code, "Unknown")
 
-# 재시도 로직이 적용된 개별 파일 처리 함수
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
 def process_single_file(filename, markdown_splitter, text_splitter):
     parts = filename.replace(".pdf", "").split("_")
@@ -31,16 +38,35 @@ def process_single_file(filename, markdown_splitter, text_splitter):
 
     print(f"[{bank_name} - {product_code}] 처리 중: {filename}")
 
-    # 1. 문서 로드
     file_path = os.path.join(STORAGE_DIR, filename)
     loader = UpstageDocumentParseLoader(file_path, output_format="markdown")
     docs = loader.load()
+    full_text = docs[0].page_content
 
-    # 2. 청킹
-    md_header_chunks = markdown_splitter.split_text(docs[0].page_content)
+    # =========================================================================
+    # 🚀 [추가된 로직]: 파일 전체 텍스트를 보고 LLM이 1줄 요약본을 생성하여 저장
+    # =========================================================================
+    print(f"   -> LLM 요약본(Summary) 생성 중...")
+    summary_prompt = PromptTemplate.from_template(
+        "다음은 은행 상품 약관입니다. 이 상품의 '상품명', '최고 금리', '가입 대상(예: 사회초년생 등)', '월 납입 한도'를 2~3줄로 명확하게 요약하세요.\n\n약관일부:\n{text}"
+    )
+    # 텍스트가 너무 길면 LLM이 뻗으므로 앞부분 3000자만 잘라서 요약 (주로 앞부분에 핵심 요약이 있음)
+    summary_chain = summary_prompt | llm
+    summary_result = summary_chain.invoke({"text": full_text[:3000]})
+    
+    # 요약본을 Track A 컬렉션에 단일 청크로 저장
+    summary_vector_store.add_texts(
+        texts=[summary_result.content],
+        metadatas=[{"product_code": product_code, "bank": bank_name, "filename": filename}]
+    )
+    print(f"   ✅ 요약본 저장 완료")
+
+    # =========================================================================
+    # 기존 로직: 1000글자씩 쪼개서 상세 컬렉션(Track B)에 저장
+    # =========================================================================
+    md_header_chunks = markdown_splitter.split_text(full_text)
     final_chunks = text_splitter.split_documents(md_header_chunks)
     
-    # 3. 메타데이터 주입
     for chunk in final_chunks:
         chunk.metadata.update({
             "product_code": product_code,
@@ -49,26 +75,18 @@ def process_single_file(filename, markdown_splitter, text_splitter):
             "filename": filename
         })
     
-    # 4. DB 저장
-    vector_store.add_documents(final_chunks)
-    print(f"저장 완료: {filename}")
-    time.sleep(2) # API 제한 준수
+    detail_vector_store.add_documents(final_chunks)
+    print(f"   ✅ 상세 파편 {len(final_chunks)}개 저장 완료: {filename}")
+    time.sleep(2)
 
 def ingest_files():
-    # 저장된 파일 목록 확인
-    existing_docs = collection.get()
-    processed_files = set(existing_docs['metadatas'][i]['filename'] for i in range(len(existing_docs['metadatas'])))
-    
     markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=[("#", "h1"), ("##", "h2")])
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
     for filename in os.listdir(STORAGE_DIR):
         if not filename.endswith(".pdf"): continue
-        if filename in processed_files:
-            print(f"건너뜀: {filename}")
-            continue
-        
         process_single_file(filename, markdown_splitter, text_splitter)
 
 if __name__ == "__main__":
+    print("🚀 하이브리드 RAG DB 듀얼 인제스션 시작!")
     ingest_files()
