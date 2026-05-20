@@ -1,9 +1,10 @@
 from chromadb import PersistentClient
 
 # 1. DB 연결 (저장된 경로와 동일해야 합니다)
-client = PersistentClient(path="./chroma_db")
-collection = client.get_collection("financial_docs")
+DB_PATH = "c:/Users/user/Documents/과천시/Mon/Mp_AI/chroma_db" 
 
+client = PersistentClient(path=DB_PATH)
+collection = client.get_collection("financial_docs")
 # 2. 총 저장된 데이터 개수 확인
 print(f"--- 데이터베이스 요약 ---")
 print(f"현재 총 저장된 청크(Chunk) 개수: {collection.count()}")
