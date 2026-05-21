@@ -10,19 +10,18 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 load_dotenv()
 
-# 1. 설정
+# 1. 설정 
 DB_PATH = "c:/Users/user/Documents/과천시/Mon/Mp_AI/chroma_db"
 STORAGE_DIR = "app/storage"
 
 client = PersistentClient(path=DB_PATH)
 
 embeddings = UpstageEmbeddings(model="solar-embedding-1-large")
-# [수정] LLM을 이용해 요약본을 생성하기 위한 모델 로드
 llm = ChatUpstage(model="solar-1-mini-chat")
 
-# Track B: 기존 상세 조항 파편들 저장용
+# Track B: 상세 조항 파편들 저장용
 detail_vector_store = Chroma(collection_name="financial_docs", embedding_function=embeddings, persist_directory=DB_PATH)
-# Track A: [핵심] 1단계 전수조사용 1장짜리 요약본 저장용
+# Track A: 1단계 전수조사용 요약본 저장용
 summary_vector_store = Chroma(collection_name="product_summaries", embedding_function=embeddings, persist_directory=DB_PATH)
 
 def get_bank_name(code):
@@ -44,17 +43,15 @@ def process_single_file(filename, markdown_splitter, text_splitter):
     full_text = docs[0].page_content
 
     # =========================================================================
-    # 🚀 [추가된 로직]: 파일 전체 텍스트를 보고 LLM이 1줄 요약본을 생성하여 저장
+    # LLM 요약본(Summary) 생성 및 Track A 저장
     # =========================================================================
     print(f"   -> LLM 요약본(Summary) 생성 중...")
     summary_prompt = PromptTemplate.from_template(
         "다음은 은행 상품 약관입니다. 이 상품의 '상품명', '최고 금리', '가입 대상(예: 사회초년생 등)', '월 납입 한도'를 2~3줄로 명확하게 요약하세요.\n\n약관일부:\n{text}"
     )
-    # 텍스트가 너무 길면 LLM이 뻗으므로 앞부분 3000자만 잘라서 요약 (주로 앞부분에 핵심 요약이 있음)
     summary_chain = summary_prompt | llm
     summary_result = summary_chain.invoke({"text": full_text[:3000]})
     
-    # 요약본을 Track A 컬렉션에 단일 청크로 저장
     summary_vector_store.add_texts(
         texts=[summary_result.content],
         metadatas=[{"product_code": product_code, "bank": bank_name, "filename": filename}]
@@ -80,13 +77,33 @@ def process_single_file(filename, markdown_splitter, text_splitter):
     time.sleep(2)
 
 def ingest_files():
+    # [핵심 중복 방지 로직]
+    # 이미 성공적으로 저장된 파일 이름 리스트 가져오기 (Track A 기준)
+    processed_files = set()
+    try:
+        # ChromaDB 클라이언트를 통해 직접 product_summaries 컬렉션 로드
+        summary_collection = client.get_collection("product_summaries")
+        existing_docs = summary_collection.get()
+        if existing_docs['metadatas']:
+            processed_files = set(m['filename'] for m in existing_docs['metadatas'] if 'filename' in m)
+            print(f"ℹ️ 기존 DB에서 이미 처리 완료된 파일 {len(processed_files)}개를 감지했습니다.")
+    except Exception:
+        # 컬렉션이 아예 없거나 비어있는 최초 실행 시점 처리
+        print("ℹ️ 기존에 처리된 내역이 없거나 새 컬렉션입니다. 처음부터 시작합니다.")
+    
     markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=[("#", "h1"), ("##", "h2")])
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
     for filename in os.listdir(STORAGE_DIR):
         if not filename.endswith(".pdf"): continue
+        
+        # [핵심] 이미 처리된 파일 건너뛰기
+        if filename in processed_files:
+            print(f"⏭️ 건너뜀 (이미 저장됨): {filename}")
+            continue
+            
         process_single_file(filename, markdown_splitter, text_splitter)
 
 if __name__ == "__main__":
-    print("🚀 하이브리드 RAG DB 듀얼 인제스션 시작!")
+    print("하이브리드 RAG DB '이어받기' 인제스션 가동!")
     ingest_files()
