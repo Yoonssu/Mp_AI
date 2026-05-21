@@ -17,45 +17,42 @@ for msg in st.session_state.messages:
         st.markdown(msg["content"])
 
 # 4. 사용자 질문 입력창 구성
-if user_query := st.chat_input("질문할 내용을 입력하세요. (예: 월 10만원 넣을 건데 이율 좋은 적금 추천해줘)"):
+if user_query := st.chat_input("질문할 내용을 입력하세요."):
     
     # 사용자가 입력한 질문 화면에 즉시 표시
     with st.chat_message("user"):
         st.markdown(user_query)
     st.session_state.messages.append({"role": "user", "content": user_query})
 
-    # 5. 에이전트 호출 및 스트리밍 응답 구현
+    # 5. 에이전트 호출 및 랭그래프 공식 메모리 세션 연동
     with st.chat_message("assistant"):
-        with st.status("🧠 에이전트가 66개 약관 교차 전수조사 가동 중...", expanded=True) as status:
+        with st.status("금융 에이전트가 약관 분석 및 연산 가동 중...", expanded=False) as status:
             
-            # [400 에러 해결 핵심] 세션에 쌓인 대화 기록 중 오직 핵심 무결성 대화(User/Assistant 원본 텍스트)만 추출
-            graph_messages = []
-            for m in st.session_state.messages[:-1]: # 현재 방금 넣은 질문 전까지의 과거 내역 정리
-                if m["role"] == "user":
-                    graph_messages.append(HumanMessage(content=m["content"]))
-                elif m["role"] == "assistant":
-                    graph_messages.append(AIMessage(content=m["content"]))
-            
-            # 방금 들어온 새로운 질문 추가
-            graph_messages.append(HumanMessage(content=user_query))
-            
-            inputs = {"messages": graph_messages}
+            # [버그 수정]: app_agent.py의 내장 메모리(MemorySaver)를 쓰기 때문에 과거 메시지를 수동으로 누적해서 채워 보내면 안되고, 
+            # 오직 '방금 들어온 신규 질문' 딱 하나만 리스트에 담아 찌름.
+            inputs = {"messages": [HumanMessage(content=user_query)]}
             final_answer = ""
             
-            # LangGraph 실행 및 툴 가동 모니터링 로그 출력
-            for output in app.stream(inputs, stream_mode="updates"):
+            # 고유한 thread_id를 넘겨주면, 랭그래프가 알아서 과거 대화 맥락을 메모리에서 복원합니다.
+            config = {"configurable": {"thread_id": "sujeong_banking_session_v1"}}
+            
+            # app.stream 가동
+            for output in app.stream(inputs, config=config, stream_mode="updates"):
                 for node_name, state_update in output.items():
                     if node_name == "tools":
                         last_msg = state_update["messages"][-1]
-                        st.write(f"⚙️ **[Action]** `{last_msg.name}` 상세 추론 서랍 오픈 완료")
+                        st.write(f"⚙️ **[Action]** `{last_msg.name}` 도구 연산 가동 완료")
                     
                     if node_name == "agent":
                         last_msg = state_update["messages"][-1]
                         if last_msg.content:
                             final_answer = last_msg.content
             
-            status.update(label="✅ 66개 약관 분석 및 이자율 검증 완료!", state="complete", expanded=False)
-        
-        # 분석이 완료된 최종 답변을 메인 채팅창에 노출
-        st.markdown(final_answer)
-        st.session_state.messages.append({"role": "assistant", "content": final_answer})
+            status.update(label="✅ 분석 및 자격 조건 검증 완료!", state="complete", expanded=False)
+
+        # =========================================================================
+        # [UI 렌더링] 알맹이만 화면에 깔끔하게 출력
+        # =========================================================================
+        if final_answer:
+            st.markdown(final_answer)
+            st.session_state.messages.append({"role": "assistant", "content": final_answer})

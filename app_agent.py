@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import MemorySaver 
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_chroma import Chroma
 from langchain_upstage import UpstageEmbeddings, ChatUpstage
@@ -18,21 +19,24 @@ load_dotenv()
 DB_PATH = "c:/Users/user/Documents/과천시/Mon/Mp_AI/chroma_db"
 embeddings = UpstageEmbeddings(model="solar-embedding-1-large")
 
-# [Track A] 66개 파일의 핵심 요약문만 저장된 컬렉션 (총 청크 개수 딱 66개 내외)
 summary_vector_store = Chroma(collection_name="product_summaries", embedding_function=embeddings, persist_directory=DB_PATH)
-# [Track B] 기존 약관 세부 조항이 잘게 쪼개져 있는 컬렉션 (수천 개 청크)
 detail_vector_store = Chroma(collection_name="financial_docs", embedding_function=embeddings, persist_directory=DB_PATH)
 
 
 # =========================================================================
-# 2. 하이브리드 RAG 전용 도구(Tools) 정의
+# 2. 하이브리드 RAG 전용 도구(Tools) 정의 (3번 교정 포인트: 인자 파싱 안정화)
 # =========================================================================
 
 def search_specific_details(input_str: str) -> str:
-    """전수조사 후 후보로 뽑힌 특정 파일의 우대금리 세부 조건이나 자격 요건을 정밀 조회합니다.
-    입력 형식은 반드시 '파일명, 검색키워드'여야 합니다. (예: 'HN_RR_01_Product_Manual.pdf, 우대금리')"""
+    """전수조사 후 후보로 뽑힌 특정 파일의 우대금리 세부 조건이나 자격 요건을 정밀 조회합니다."""
     try:
-        filename, keyword = [x.strip() for x in input_str.split(',')]
+        # LLM이 콤마 대신 공백이나 다른 문자로 인자를 던질 경우를 대비한 방어 코드
+        if ',' in input_str:
+            filename, keyword = [x.strip() for x in input_str.split(',', 1)]
+        else:
+            filename = input_str.strip()
+            keyword = "우대조건"
+            
         print(f"\n⚡ [하이브리드 RAG] Phase 2: {filename} 파일 상세 내용 딥다이브 (키워드: {keyword})")
         
         retriever = detail_vector_store.as_retriever(
@@ -43,23 +47,24 @@ def search_specific_details(input_str: str) -> str:
         )
         docs = retriever.invoke(keyword)
         
-        results = []
-        for d in docs:
-            results.append(f"[상세 조항 조각]\n{d.page_content}")
-        return "\n\n".join(results)
+        if not docs:
+            return f"[{filename}] 해당 키워드에 대한 상세 조항을 찾지 못했습니다."
+            
+        return "\n\n".join([f"[상세 조항 조각]\n{d.page_content}" for d in docs])
     except Exception as e:
-        return f"상세 조회 실패. 인자 형식을 '파일명,키워드' 형태로 정확히 넘겨야 합니다. (에러: {str(e)})"
+        return f"상세 조회 실패. (에러: {str(e)})"
 
 
 def calculate_maturity_amount(input_str: str) -> str:
-    """월 납입액과 이자율을 받아 1년(12개월) 만기 단리 방식으로 세전 이자와 원금을 계산합니다.
-    입력 형식은 반드시 '월납입액,금리' 숫자로만 이루어져야 합니다. (예: '100000,4.5')"""
+    """월 납입액과 이자율을 받아 1년(12개월) 만기 단리 방식으로 세전 이자와 원금을 계산합니다."""
     try:
-        clean_str = input_str.replace(" ", "").replace("%", "")
-        match = re.search(r"(\d+),([\d.]+)", clean_str)
-        if match:
-            amount = float(match.group(1))
-            rate = float(match.group(2))
+        # 이진 분류 및 숫자 추출 정규식 강화 (할루시네이션 숫자 전면 차단)
+        clean_str = input_str.replace(" ", "").replace("%", "").replace("원", "")
+        match = re.findall(r"[\d.]+", clean_str)
+        
+        if len(match) >= 2:
+            amount = float(match[0])
+            rate = float(match[1])
         else:
             amount, rate = map(float, clean_str.split(','))
             
@@ -68,7 +73,7 @@ def calculate_maturity_amount(input_str: str) -> str:
         
         return f"[계산 성공] 1년 만기 원금: {int(total_principal):,}원, 예상 세전 이자: {int(total_interest):,}원, 만기 총 수령액: {int(total_principal + total_interest):,}원"
     except Exception as e:
-        return f"계산 실패. 에이전트 너는 절대로 수식이나 문장을 쓰지 말고 오직 '100000,4.5' 형태로 숫자만 인자로 다시 넘겨라. (에러: {str(e)})"
+        return f"계산 실패. 정확한 숫자를 파싱할 수 없습니다. (에러: {str(e)})"
 
 
 tools_map = {
@@ -81,7 +86,7 @@ class AgentState(TypedDict):
 
 
 # =========================================================================
-# 3. Upstage 모델 설정 및 도구 규격 바인딩 (엄격화)
+# 3. Upstage 모델 설정 및 도구 규격 바인딩
 # =========================================================================
 llm = ChatUpstage(model="solar-1-mini-chat", temperature=0)
 llm_with_tools = llm.bind_tools([
@@ -89,7 +94,7 @@ llm_with_tools = llm.bind_tools([
         "type": "function",
         "function": {
             "name": "search_specific_details",
-            "description": "선택한 특정 약관 파일의 우대금리 세부 조항이나 조건 서류를 정밀 파싱합니다. 인자는 반드시 '파일명,키워드' 구조로 콤마로 구분된 단일 문자열이어야 합니다. (예: 'HN_MS_01_Product_Manual.pdf,우대이율')",
+            "description": "선택한 특정 약관 파일의 우대금리 세부 조항을 정밀 파싱합니다. 인자는 반드시 '파일명,키워드' 구조여야 합니다. 예시: 'SH_Youth_01_Product_Manual.pdf,우대조건'",
             "parameters": {"type": "object", "properties": {"input_str": {"type": "string"}}, "required": ["input_str"]}
         }
     },
@@ -97,7 +102,7 @@ llm_with_tools = llm.bind_tools([
         "type": "function",
         "function": {
             "name": "calculate_maturity_amount",
-            "description": "★절대 경고: 인자에 %, *, 연산 기호나 글자를 포함하지 마십시오. 오직 '월납입액숫자,금리숫자'만 순수하게 넣어야 합니다. 예시: 10만 원에 5.2% 이자 계산을 원하면 무조건 '100000,5.2' 라고만 적어 호출하십시오.",
+            "description": "월 납입액과 금리로 만기 이자를 계산합니다. 인자는 반드시 '월납입액숫자,금리숫자' 형태로 넣어야 합니다. 예시: '300000,6.05'",
             "parameters": {"type": "object", "properties": {"input_str": {"type": "string"}}, "required": ["input_str"]}
         }
     }
@@ -106,34 +111,30 @@ llm_with_tools = llm.bind_tools([
 
 # =========================================================================
 # 4. LangGraph 그래프 노드 및 컨트롤 라우터 함수 정의
+#    (1번 & 2번 교정 포인트: 파싱 버그 컷 및 연속 질문 맥락 토스 복원)
 # =========================================================================
 
 def force_first_inspection(state: AgentState):
-    """[디버깅 모드] 임베딩 API와 DB 검색 구간을 쪼개어 무한 대기 구간을 찾습니다."""
+    """최초 질문일 때만 1차 요약 RAG를 돌리고, 연속 질문 시에는 메시지를 오염시키지 않고 그대로 패스합니다."""
+    
+    # 💥 [2번 버그 해결]: 대화 기록이 1개보다 많다 = 연속 질문이다!
+    # 기존 메시지들을 한 글자도 건드리지 않고 그대로 반환하여 agent 노드가 새 질문을 인식하게 합니다.
+    if len(state["messages"]) > 1:
+        print("ℹ️ [메모리 작동] 연속 질문 맥락이 감지되어 요약본 DB 조회를 안전하게 패스합니다.")
+        return {"messages": []}
+
     print(f"\n⚡ [진짜 RAG] 사용자 질문 기반 벡터 의미 검색 가동 중...")
     
-    # 🔍 1. API 키 로드 검사 (무한 재시도 버그 방지)
-    api_key = os.getenv("UPSTAGE_API_KEY")
-    if not api_key:
-        print("❌ [경고/에러] UPSTAGE_API_KEY가 없습니다! .env 파일이 제대로 로드되지 않아 API가 무한 대기 중일 수 있습니다.")
-    else:
-        print(f"✅ API 키 인식 완료 (시작 문자: {api_key[:5]}...)")
-
+    # 💥 [1번 버그 해결]: 무리한 텍스트 자르기(split) 대신 안전하게 최신 질문 content 확보
     last_msg = state["messages"][-1]
-    user_msg_content = last_msg.content.replace("[사용자 원본 질문]:", "").split("===")[0].strip()
+    user_msg_content = last_msg.content.strip()
     
     try:
-        # 🔍 2. Upstage 임베딩 API 통신 테스트 (대부분 여기서 멈춤)
-        print(f"▶️ [STEP 1: 임베딩] '{user_msg_content}' -> 수치(벡터)로 변환 시도 중...")
+        print(f"▶️ [STEP 1: 임베딩] '{user_msg_content}' -> 벡터 변환 중...")
         query_vector = embeddings.embed_query(user_msg_content)
-        print("✅ [STEP 1 완료] Upstage 서버에서 수치 변환 성공!")
-        
-        # 🔍 3. Chroma DB 로컬 검색 테스트
-        print("▶️ [STEP 2: DB 검색] 변환된 수치로 ChromaDB 유사도 대조 중...")
-        # invoke 대신 쪼개진 함수 직접 사용
+        print("▶️ [STEP 2: DB 검색] ChromaDB 유사도 대조 중...")
         docs = summary_vector_store.similarity_search_by_vector(query_vector, k=5) 
         print(f"✅ [STEP 2 완료] 가장 유사한 {len(docs)}개 문서 검색 성공!")
-        
     except Exception as e:
         print(f"❌ [에러 발생] {str(e)}")
         raise e
@@ -141,49 +142,45 @@ def force_first_inspection(state: AgentState):
     results = [f"📄 [{d.metadata.get('filename', 'Unknown')}] {d.page_content}" for d in docs]
     summary_context = "\n".join(results)
     
+    # 첫 질문일 때만 컨텍스트를 이쁘게 보강하여 넘겨줍니다.
     enriched_content = (
-        f"[사용자 원본 질문]: {user_msg_content}\n\n"
-        f"=== [의미 기반 벡터 검색 결과: 상위 5개 후보 상품 요약본] ===\n"
-        f"{summary_context}\n"
-        f"====================================="
+        f"[참고 데이터 - 상위 5개 후보 상품 요약본]\n{summary_context}\n"
+        f" 사용자 원본 질문: {user_msg_content}"
     )
     
-    enriched_message = HumanMessage(content=enriched_content, id=last_msg.id)
-    return {"messages": [enriched_message]}
+    return {"messages": [HumanMessage(content=enriched_content, id=last_msg.id)]}
 
 
 def call_model(state: AgentState):
     system_prompt = (
-        "당신은 오직 제공된 [참고 데이터] 안에서만 정답을 찾는 깐깐한 금융 비서입니다.\n"
-        "★절대 경고: 당신의 사전 학습 지식을 사용하거나 '하나원큐' 같은 가상의 상품을 지어내지 마세요.\n"
-        "무조건 사용자 메시지 아래에 주입된 [참고 데이터: 4대 은행 전체 상품 요약본] 텍스트 안에 존재하는 '실제 상품명'과 '실제 파일명'만 골라서 사용해야 합니다.\n\n"
+        "당신은 오직 제공된 [참고 데이터], [과거 대화 기록], 그리고 도구의 실행 결과 안에서만 정답을 찾는 전문 금융 자산 컨설턴트입니다.\n"
+        "★절대 경고: 당신의 사전 학습 지식으로 이자를 계산하거나 금액을 지어내지 마세요. 반드시 'calculate_maturity_amount' 도구를 호출해 그 결과를 보고 쓰세요.\n\n"
         
-        "안내 문구를 출력하지 말고, 찾은 실제 파일명을 사용해 즉시 다음 도구를 순서대로 호출하세요:\n"
-        "1. search_specific_details (인자 예시: '실제파일명.pdf, 우대조건')\n"
-        "2. calculate_maturity_amount"
+        "★[⚠️ 필독 - 출력 포맷 가이드]\n"
+        "도구 결과가 모두 수집된 최종 단계에서는 오직 아래의 3가지 섹션만 순서대로 출력해야 하며, 내용 도돌이표 중복이나 이 외의 사족은 절대 금지합니다.\n\n"
+        "[분석 결과]\n"
+        "(마크다운 표 형태로 한글 은행명, 상품명, 최고 금리, 가입 대상, 월 납입 한도, 툴이 계산해준 진짜 '만기 수령액' 정보 정리)\n\n"
+        "[추천 이유]\n"
+        "(해당 상품의 구체적인 우대 자격 조건들을 데이터에 기반하여 구체적으로 서술)\n\n"
+        "[최종 분석 답변]\n"
+        "(도구 결과로 나온 원금과 이자를 바탕으로 깔끔한 리포트 문장 마무리)"
     )
-    # 400 에러 재발을 완벽하게 예방하기 위해 시스템 프롬프트 결합 시 순수한 기록들만 필터링
+    
     clean_messages = []
     for m in state["messages"]:
-        if isinstance(m, HumanMessage):
-            # HumanMessage는 tool_calls 검사 없이 안전하게 추가
-            clean_messages.append(m)
-        elif isinstance(m, AIMessage):
-            # AIMessage 일 때만 내부 tool_calls 속성이 있는지 검사
-            clean_messages.append(m)
-        elif isinstance(m, ToolMessage):
+        if isinstance(m, (HumanMessage, AIMessage, ToolMessage)):
             clean_messages.append(m)
             
     messages = [{"role": "system", "content": system_prompt}] + clean_messages
     response = llm_with_tools.invoke(messages)
     print("✅ [API 완료] Upstage LLM 응답 도착!")
-    # -----------------------------
     
     return {"messages": [response]}
 
+
 def router(state: AgentState):
     last_message = state["messages"][-1]
-    if len(state["messages"]) > 12:
+    if len(state["messages"]) > 15:
         return "end"
     if last_message.tool_calls:
         return "continue"
@@ -200,7 +197,6 @@ def call_tools(state: AgentState):
         arg_value = tool_args.get("input_str") or tool_args.get("query")
         
         print(f"\n[🔄 Action] 에이전트 도구 호출 승인: {tool_name} (전달된 인자: '{arg_value}')")
-        
         result = tools_map[tool_name](arg_value)
         tool_messages.append(ToolMessage(content=result, tool_call_id=tool_call["id"], name=tool_name))
         
@@ -222,25 +218,5 @@ workflow.add_edge("force_inspect", "agent")
 workflow.add_conditional_edges("agent", router, {"continue": "tools", "end": END})
 workflow.add_edge("tools", "agent")
 
-app = workflow.compile()
-
-if __name__ == "__main__":
-    print("\n==================================================")
-    print("🚀 하이브리드 2-Track RAG 금융 에이전트 시스템 가동")
-    print("==================================================\n")
-    
-    while True:
-        user_query = input("[User 질문 입력]: ")
-        if user_query.strip() in ["종료", "exit", "quit"]:
-            break
-        if not user_query.strip():
-            continue
-            
-        inputs = {"messages": [HumanMessage(content=user_query)]}
-        for output in app.stream(inputs, stream_mode="updates"):
-            for node_name, state_update in output.items():
-                if node_name == "agent":
-                    last_msg = state_update["messages"][-1]
-                    if last_msg.content:
-                        print(f"\n[✨ 에이전트 최종 분석 답변]\n{last_msg.content}\n")
-        print("-" * 60)
+memory = MemorySaver()
+app = workflow.compile(checkpointer=memory)
