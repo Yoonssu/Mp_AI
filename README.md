@@ -10,8 +10,6 @@
 
 ---
 
-
-
 ## 🏗️ 2. 시스템 아키텍처 (Architecture Deep Dive)
 
 본 프로젝트는 데이터의 정확성과 멀티턴 대화의 안정성을 보장하기 위해 구조와 책임을 **4개의 독립된 레이어**로 이원화하여 설계했습니다.
@@ -25,8 +23,46 @@
 
 
 
----
+```mermaid
+graph TD
+    %% 스타일 정의
+    classDef startEnd fill:#f9f,stroke:#333,stroke-width:2px;
+    classDef nodeStyle fill:#bbf,stroke:#333,stroke-width:1px;
+    classDef toolStyle fill:#ffb,stroke:#333,stroke-width:1px;
+    classDef routeStyle fill:#f96,stroke:#333,stroke-width:1px;
 
+    START([사용자 질문 입력]) --> F_INSPECT{1. force_first_inspection<br>스마트 메모리 감지}
+    
+    %% 1단계 분기 (최초 vs 연속)
+    F_INSPECT -- "최초 질문<br>(len=1)" --> TRACK_A[Track A: 요약본 DB 전수조사<br>상위 5개 후보 상품 추출]
+    F_INSPECT -- "연속 질문<br>(len>1)" --> BYPASS[DB 조회 스킵<br>기존 맥락 보존 패스]
+    
+    TRACK_A --> AGENT[2. agent 노드<br>Upstage Solar LLM 추론]
+    BYPASS --> AGENT
+    
+    %% 에이전트 라우팅 분기
+    AGENT --> ROUTER{3. router<br>컨트롤 라우터}
+    
+    ROUTER -- "end<br>(최종 답변 완료)" --> END([🛑 END<br>Streamlit UI 최종 출력])
+    ROUTER -- "continue<br>(도구 호출 필요)" --> TOOLS[4. tools 노드<br>에이전트 도구 가동]
+    
+    %% 도구 실행 레이어
+    TOOLS --> TOOL_EXEC{어떤 연산이 필요한가?}
+    TOOL_EXEC -- "상세 RAG" --> T1[search_specific_details<br>Track B: 상세 약관 격리 검색]
+    TOOL_EXEC -- "수식 연산" --> T2[calculate_maturity_amount<br>파이썬 단리 계산기]
+    
+    %% 다시 루프 순환
+    T1 --> AGENT
+    T2 --> AGENT
+
+    %% 클래스 바인딩
+    class START,END startEnd;
+    class AGENT,F_INSPECT nodeStyle;
+    class T1,T2,TOOLS toolStyle;
+    class ROUTER,TOOL_EXEC routeStyle;
+```
+
+---
 
 
 ## ⭐ 3. 핵심 기능 (Key Features)
