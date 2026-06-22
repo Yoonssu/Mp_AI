@@ -1,20 +1,34 @@
+from pathlib import Path
+import sys
+
 from chromadb import PersistentClient
 
-# 1. DB 연결 (저장된 경로와 동일해야 합니다)
-DB_PATH = "c:/Users/user/Documents/과천시/Mon/Mp_AI/chroma_db" 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
-client = PersistentClient(path=DB_PATH)
-collection = client.get_collection("financial_docs")
-# 2. 총 저장된 데이터 개수 확인
-print(f"--- 데이터베이스 요약 ---")
-print(f"현재 총 저장된 청크(Chunk) 개수: {collection.count()}")
+from app.config import get_settings
 
-# 3. 샘플 데이터(데이터 중 1개)를 꺼내서 확인
-print(f"\n--- 데이터 샘플 확인 ---")
-sample = collection.peek(1) # 가장 최신 혹은 첫 번째 데이터를 살짝 엿봅니다.
 
-print("메타데이터(Metadata):")
-print(sample['metadatas'][0])
+def main():
+    settings = get_settings()
+    client = PersistentClient(path=str(settings.chroma_db_path))
+    collection = client.get_collection(settings.detail_collection)
 
-print("\n텍스트 내용(Text):")
-print(sample['documents'][0][:200] + "...") # 너무 길면 앞부분만 출력
+    print("--- 데이터베이스 요약 ---")
+    print(f"상세 컬렉션: {settings.detail_collection}")
+    print(f"현재 총 저장된 청크 개수: {collection.count()}")
+
+    sample = collection.peek(1)
+    if not sample.get("documents"):
+        print("샘플 데이터가 없습니다.")
+        return
+
+    print("\n--- 데이터 샘플 확인 ---")
+    print("메타데이터:")
+    print(sample["metadatas"][0])
+    print("\n텍스트 내용:")
+    print(sample["documents"][0][:200] + "...")
+
+
+if __name__ == "__main__":
+    main()
