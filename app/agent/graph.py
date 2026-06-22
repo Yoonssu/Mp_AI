@@ -28,6 +28,8 @@ SYSTEM_PROMPT = """
 - 만기 수령액은 반드시 calculate_maturity_amount 도구 결과를 사용하세요.
 - calculate_maturity_amount를 호출하기 전에는 월 납입액과 연 금리 두 값을 모두 확정해야 합니다.
 - 사용자가 "월 20만원"처럼 납입액만 말하면, 참고 데이터의 후보 상품에서 최고 금리를 먼저 읽고 '200000, 금리' 형식으로 계산하세요.
+- 여러 후보가 있어도 최종 추천 상품 1개를 먼저 고른 뒤 calculate_maturity_amount는 그 상품에 대해 1번만 호출하세요.
+- "[계산 성공]" 도구 결과를 받으면 calculate_maturity_amount를 다시 호출하지 말고 즉시 최종 답변을 작성하세요.
 - 도구 결과가 "[계산 재시도 필요]"로 시작하면 최종 답변을 하지 말고, 참고 데이터에서 금리를 확인해 calculate_maturity_amount를 다시 호출하세요.
 - 금리가 참고 데이터에 없으면 계산하지 말고 어떤 정보가 부족한지 설명하세요.
 
@@ -65,14 +67,22 @@ def call_model(state: AgentState):
         for message in state["messages"]
         if isinstance(message, (HumanMessage, AIMessage, ToolMessage))
     ]
-    response = llm_with_tools.invoke([{"role": "system", "content": SYSTEM_PROMPT}] + clean_messages)
+    model = llm if has_force_final_instruction(state) else llm_with_tools
+    response = model.invoke([{"role": "system", "content": SYSTEM_PROMPT}] + clean_messages)
     return {"messages": [response]}
+
+
+def has_force_final_instruction(state: AgentState) -> bool:
+    return any(
+        "[최종 답변 작성 지시]" in (getattr(message, "content", "") or "")
+        for message in state["messages"]
+    )
 
 
 def route_after_model(state: AgentState):
     last_message = state["messages"][-1]
     if len(state["messages"]) > 15:
-        return "end"
+        return "force_final"
     if getattr(last_message, "tool_calls", None):
         return "continue"
     if should_repair_calculation(state):
@@ -97,12 +107,44 @@ def call_tools(state: AgentState):
     return {"messages": tool_messages}
 
 
+def route_after_tools(state: AgentState):
+    if count_tool_messages(state, "calculate_maturity_amount") >= 2:
+        return "force_final"
+    return "agent"
+
+
+def count_tool_messages(state: AgentState, tool_name: str) -> int:
+    return sum(
+        1
+        for message in state["messages"]
+        if isinstance(message, ToolMessage) and message.name == tool_name
+    )
+
+
+def force_final_answer(state: AgentState):
+    instruction = (
+        "[최종 답변 작성 지시]\n"
+        "계산 도구를 더 이상 호출하지 마세요. 지금까지 받은 참고 데이터, 상세 조항, "
+        "그리고 calculate_maturity_amount의 최신 [계산 성공] 결과만 사용해 최종 답변을 작성하세요.\n"
+        "만약 여러 계산 결과가 있다면 사용자 질문 조건에 가장 잘 맞는 최종 추천 상품 1개의 계산 결과를 사용하세요.\n"
+        "최종 답변에는 [분석 결과], [추천 이유], [최종 분석 답변] 섹션만 포함하세요."
+    )
+    return {"messages": [HumanMessage(content=instruction)]}
+
+
 def should_repair_calculation(state: AgentState) -> bool:
     last_message = state["messages"][-1]
     content = getattr(last_message, "content", "") or ""
     if "[자동 계산 보정]" in "\n".join(getattr(message, "content", "") for message in state["messages"]):
         return False
-    return "[계산 재시도 필요]" in content
+    if "[계산 재시도 필요]" in content:
+        return True
+    if "[계산 성공]" in content and "만기 총 수령액" not in content:
+        return True
+    if "만기 수령액" in content and "만기 총 수령액" not in content:
+        all_content = "\n".join(getattr(message, "content", "") or "" for message in state["messages"])
+        return extract_monthly_amount(extract_user_query(all_content)) is not None and extract_annual_rate(content) is not None
+    return False
 
 
 def repair_calculation(state: AgentState):
@@ -146,16 +188,27 @@ def build_graph():
     workflow.add_node("agent", call_model)
     workflow.add_node("tools", call_tools)
     workflow.add_node("repair_calculation", repair_calculation)
+    workflow.add_node("force_final_answer", force_final_answer)
 
     workflow.add_edge(START, "enrich_first_turn")
     workflow.add_edge("enrich_first_turn", "agent")
     workflow.add_conditional_edges(
         "agent",
         route_after_model,
-        {"continue": "tools", "repair": "repair_calculation", "end": END},
+        {
+            "continue": "tools",
+            "repair": "repair_calculation",
+            "force_final": "force_final_answer",
+            "end": END,
+        },
     )
-    workflow.add_edge("tools", "agent")
+    workflow.add_conditional_edges(
+        "tools",
+        route_after_tools,
+        {"agent": "agent", "force_final": "force_final_answer"},
+    )
     workflow.add_edge("repair_calculation", "agent")
+    workflow.add_edge("force_final_answer", "agent")
 
     return workflow.compile(checkpointer=MemorySaver())
 
